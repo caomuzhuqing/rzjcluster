@@ -1,0 +1,145 @@
+---
+title: "RZJ提交代码20"
+author: "rzj"
+date: "2025-11-13"
+output: html_document
+---
+
+
+
+```{r}
+
+# Impute covariates with missing values
+library(mice)
+variables_to_impute <- c("MARITAL", "EDU", "ELEVELM", "SMOKE", "DRINK", "ACTIVITIES", "EXERCISE")
+subset_for_impute <- last[, variables_to_impute]
+set.seed(123)
+impute_model <- mice(data = subset_for_impute, method = "rf", m = 1, maxit = 5, seed = 123)
+last[variables_to_impute] <- complete(impute_model)
+sapply(last[variables_to_impute], function(x) sum(is.na(x)))
+
+
+```
+
+
+
+```{r}
+# clustering
+required_packages <- c("readxl", "tidyverse", "Rtsne", "umap", "ggplot2", 
+                      "factoextra", "NbClust", "openxlsx")
+invisible(lapply(required_packages, library, character.only = TRUE))
+
+preprocess_data <- function(data, height_col = "WD_VAR48", measure_cols = 154:297) {
+  D_normalized <- data[, measure_cols] / data[[height_col]]
+  body_measures_scaled <- scale(D_normalized)
+  body_measures_scaled <- as.data.frame(body_measures_scaled)
+  full_scaled <- body_measures_scaled[, !(colnames(body_measures_scaled) == height_col)]
+  return(list(
+    full_scaled = full_scaled
+  ))
+}
+
+find_optimal_clusters <- function(data, min_k = 4, max_k = 15) {
+  set.seed(123)
+  nb_results <- NbClust(data = data, 
+                        distance = "euclidean",
+                        min.nc = min_k, 
+                        max.nc = max_k, 
+                        method = "kmeans",
+                        index = "all")
+
+  optimal_k <- nb_results$Best.nc[1]
+  
+  return(list(
+    optimal_k = optimal_k,
+    full_results = nb_results
+  ))
+}
+
+perform_clustering <- function(data, k, perplexity = 50) {
+  set.seed(123)
+  kmeans_result <- kmeans(data, centers = k, nstart = 25)
+  return(list(
+    kmeans = kmeans_result
+  ))
+}
+
+
+compute_bootstrap_ari_parallel <- function(scaled_data, base_cluster,
+                                           k = 5, n_boot = 1000,
+                                           seed = 123, cores = 4,
+                                           verbose = TRUE) {
+  library(fpc)
+  library(foreach)
+  library(doParallel)
+  library(mclust)  
+  cl <- makeCluster(cores)
+  registerDoParallel(cl)
+  set.seed(seed)
+  ari_scores <- foreach(i = 1:n_boot, .combine = c,
+                        .packages = c("stats", "mclust")) %dopar% {
+    boot_idx <- sample(seq_len(nrow(scaled_data)), replace = TRUE)
+    boot_sample <- scaled_data[boot_idx, ]
+    set.seed(seed + i)  
+    boot_cluster <- tryCatch({
+      kmeans(boot_sample, centers = k, nstart = 25)$cluster
+    }, error = function(e) {
+      rep(NA, length(boot_idx))
+    })
+    if (length(boot_cluster) == length(boot_idx)) {
+      adjustedRandIndex(base_cluster[boot_idx], boot_cluster)
+    } else {
+      NA
+    }
+  }
+  stopCluster(cl)
+  valid_scores <- ari_scores[!is.na(ari_scores)]
+  if (verbose) {
+  cat(sprintf("\nCompleted %d iterations in parallel, with %d valid ARI scores\n", n_boot, length(valid_scores)))
+  cat(sprintf("Average ARI = %.4f\n", mean(valid_scores)))
+  }
+  return(valid_scores)
+}
+
+# Main execution
+main <- function() {
+  data <- last.dat
+  processed_data <- preprocess_data(data)
+  
+  clustering_evaluation <- find_optimal_clusters(processed_data$full_scaled)
+  optimal_k <- clustering_evaluation$optimal_k
+  
+  clustering_results <- perform_clustering(processed_data$full_scaled, optimal_k)
+  write.csv(clustering_results[["kmeans"]][["centers"]],'centers.csv')
+  
+  ari_scores <- compute_bootstrap_ari_parallel(
+  scaled_data  = processed_data$full_scaled,
+  base_cluster = clustering_results$kmeans$cluster,
+  k            = optimal_k,
+  n_boot       = 1000,
+  seed         = 123,
+  cores        = 18,
+  verbose      = TRUE
+)
+
+  
+  return(list(
+    clustering = clustering_results,
+    evaluation = clustering_evaluation$full_results,
+    bootstrap_ari = ari_scores
+  ))
+}
+
+results <- main()
+
+
+
+
+```
+
+
+
+
+
+
+
